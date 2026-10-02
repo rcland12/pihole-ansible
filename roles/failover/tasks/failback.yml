@@ -1,0 +1,88 @@
+---
+- name: Failover state
+  ansible.builtin.stat:
+    path: "{{ pihole_state_dir }}/failover-active"
+  register: fo_flag
+
+- name: Nothing to undo
+  ansible.builtin.fail:
+    msg: "No failover is active on {{ inventory_hostname }}."
+  when: not fo_flag.stat.exists
+
+- name: Mode
+  ansible.builtin.set_fact:
+    fo_test: "{{ pihole_failover_test_ip | length > 0 }}"
+    fo_ip: "{{ pihole_failover_test_ip if pihole_failover_test_ip | length > 0 else pihole_service_ip }}"
+
+# Anything changed on the standby while it was in charge (a new reservation,
+# a list) would be overwritten when the sync resumes from the primary. Keep a
+# copy to import into the primary by hand if needed.
+- name: Save the standby's config from its time in charge
+  ansible.builtin.shell: |
+    set -euo pipefail
+    d=$(mktemp -d); cd "$d"
+    pihole-FTL --teleporter >/dev/null
+    mv pi-hole_*_teleporter_*.zip {{ pihole_state_dir }}/failover-config-$(date +%F-%H%M).zip
+    rm -rf "$d"; ls -1t {{ pihole_state_dir }}/failover-config-*.zip | head -1
+  args:
+    executable: /bin/bash
+  register: fo_export
+  changed_when: true
+  when: not fo_test | bool
+
+- name: Stop serving DHCP
+  ansible.builtin.command: pihole-FTL --config dhcp.active false
+  changed_when: true
+
+- name: Restart FTL
+  ansible.builtin.systemd_service:
+    name: pihole-FTL
+    state: restarted
+
+- name: NetworkManager connection on {{ pihole_interface }}
+  ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show {{ pihole_interface }}
+  register: nm_conn
+  changed_when: false
+
+- name: Remove {{ fo_ip }} from the connection profile
+  ansible.builtin.command: >-
+    nmcli connection modify {{ nm_conn.stdout | quote }} -ipv4.addresses {{ fo_ip }}/{{ pihole_prefix }}
+  changed_when: true
+
+# Re-activation is what makes NetworkManager drop it (see failover.yml).
+- name: Re-activate the connection (the SSH session may blip)
+  ansible.builtin.shell: sleep 1; nmcli connection up {{ nm_conn.stdout | quote }}
+  async: 60
+  poll: 0
+  changed_when: true
+
+- name: Reconnect
+  ansible.builtin.wait_for_connection:
+    delay: 3
+    timeout: 90
+
+- name: The service address is gone from this host
+  ansible.builtin.shell: ip -4 -o addr show dev {{ pihole_interface }} | grep -c ' {{ fo_ip }}/' || true
+  register: fo_left
+  until: fo_left.stdout | trim == '0'
+  retries: 10
+  delay: 2
+  changed_when: false
+
+- name: Clear the failover flag
+  ansible.builtin.file:
+    path: "{{ pihole_state_dir }}/failover-active"
+    state: absent
+
+- name: Resume syncing from the primary
+  ansible.builtin.systemd_service:
+    name: pihole-sync.timer
+    state: started
+
+- name: Done
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} released {{ fo_ip }} and is a DHCP-less standby again.
+      {% if not fo_test | bool %}NOW power {{ pihole_primary }} back on - not before, or two hosts claim {{ fo_ip }}.
+      Changes made here while in charge are saved in {{ fo_export.stdout }}; import into {{ pihole_primary }}
+      (Settings > Teleporter) only if you made any.{% endif %}

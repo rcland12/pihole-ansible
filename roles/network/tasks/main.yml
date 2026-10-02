@@ -1,0 +1,33 @@
+---
+- name: Address and gateway are required
+  ansible.builtin.assert:
+    that: pihole_net_address | length > 0 and pihole_net_gateway | length > 0
+
+- name: NetworkManager connection on {{ pihole_net_interface }}
+  ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show {{ pihole_net_interface }}
+  register: pn_conn
+  changed_when: false
+
+- name: Static address {{ pihole_net_address }}
+  ansible.builtin.command: >-
+    nmcli connection modify {{ pn_conn.stdout | quote }}
+    ipv4.method manual ipv4.addresses {{ pihole_net_address }}
+    ipv4.gateway {{ pihole_net_gateway }} ipv4.dns {{ pihole_net_dns }} ipv4.ignore-auto-dns yes
+  changed_when: true
+
+# The SSH connection runs over the old address, which is about to go away:
+# fire the switch in the background and reconnect on the new one.
+- name: Switch to it (connection drops here)
+  ansible.builtin.shell: sleep 2; nmcli connection up {{ pn_conn.stdout | quote }}
+  async: 60
+  poll: 0
+  changed_when: true
+
+- name: Talk to the host on its new address from now on
+  ansible.builtin.set_fact:
+    ansible_host: "{{ pihole_net_address.split('/')[0] }}"
+
+- name: Wait for it to come back on {{ pihole_net_address }}
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 120

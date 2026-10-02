@@ -1,0 +1,23 @@
+---
+# Move the Pi-hole service - DNS, DHCP and the address clients know it by -
+# from the primary to the standby, and back. Run against the STANDBY.
+#
+# Every device on the LAN was told by DHCP to use the primary's address for
+# DNS. So the standby takes over that address as a second one on its own
+# interface: no client, router or reservation has to change.
+
+pihole_primary: ""          # REQUIRED: the primary's inventory hostname
+pihole_service_ip: "{{ hostvars[pihole_primary].ansible_host }}"
+pihole_prefix: 24
+pihole_interface: eth0
+
+# Rehearsal: take over this spare address instead, never enable DHCP, and do
+# not require the primary to be down. -e pihole_failover_test_ip=<a free address>
+pihole_failover_test_ip: ""
+
+# Take over even though the primary still answers DNS (you are sure it is
+# broken in some other way). Two DHCP servers and a duplicate address follow
+# if it is actually still serving - power it off first.
+pihole_failover_force: false
+
+pihole_state_dir: /var/lib/pihole-sync

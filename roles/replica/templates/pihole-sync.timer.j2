@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Sync Pi-hole from {{ pihole_primary }} every {{ pihole_sync_interval }}
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec={{ pihole_sync_interval }}
+
+[Install]
+WantedBy=timers.target

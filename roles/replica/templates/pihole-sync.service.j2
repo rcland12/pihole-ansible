@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Sync Pi-hole configuration from {{ pihole_primary }} (DHCP excluded)
+Wants=network-online.target
+After=network-online.target pihole-FTL.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pihole-sync

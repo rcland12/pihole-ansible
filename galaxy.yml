@@ -1,0 +1,21 @@
+namespace: rcland12
+name: pihole
+version: 1.0.0
+readme: README.md
+authors:
+  - rcland12
+description: >-
+  Pi-hole v6 with a warm standby: unattended install from a Teleporter archive,
+  a DHCP-less replica kept in sync, one-command failover/failback of DNS, DHCP
+  and the service address, unbound, ufw and a mkcert web certificate.
+license:
+  - MIT
+tags: [pihole, dns, dhcp, failover, raspberrypi, unbound]
+dependencies:
+  community.general: ">=6.0.0"
+  community.crypto: ">=2.0.0"
+  ansible.posix: ">=1.5.0"
+repository: https://github.com/rcland12/pihole-ansible
+build_ignore:
+  - "*.tar.gz"
+  - examples/inventory.local.yml

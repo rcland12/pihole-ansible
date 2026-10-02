@@ -1,0 +1,24 @@
+---
+# What a Pi-hole host has around Pi-hole itself, so the standby and a rebuilt
+# primary behave exactly like the current primary:
+#  - unbound on 127.0.0.1#5335, Pi-hole's first upstream (a private recursive
+#    resolver - without it every lookup falls back to 1.1.1.1);
+#  - the same ufw firewall.
+
+# Private range allowed to reach SSH, the admin UI and NTP.
+pihole_lan_cidr: 192.168.0.0/16
+pihole_unbound: true
+
+# DNS/DHCP/NTP from anywhere (they are LAN services
+# answering LAN clients); SSH and the admin UI only from private ranges.
+pihole_ufw_rules:
+  - { port: "53",  proto: tcp }
+  - { port: "53",  proto: udp }
+  - { port: "67",  proto: udp }
+  - { port: "68",  proto: udp }
+  - { port: "22",  proto: tcp, from: "{{ pihole_lan_cidr }}" }
+  - { port: "80",  proto: tcp, from: "{{ pihole_lan_cidr }}" }
+  - { port: "443", proto: tcp, from: "{{ pihole_lan_cidr }}" }
+  - { port: "123", proto: udp, from: "{{ pihole_lan_cidr }}", comment: "NTP server (Pi-hole FTL)" }
+  - { port: "80",  proto: tcp, from: fd00::/8 }
+  - { port: "443", proto: tcp, from: fd00::/8 }

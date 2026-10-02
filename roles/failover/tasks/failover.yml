@@ -1,0 +1,185 @@
+---
+- name: pihole_primary must name the primary's inventory host
+  ansible.builtin.assert:
+    that: pihole_primary | length > 0 and pihole_primary in hostvars
+
+- name: Mode
+  ansible.builtin.set_fact:
+    fo_test: "{{ pihole_failover_test_ip | length > 0 }}"
+    fo_ip: "{{ pihole_failover_test_ip if pihole_failover_test_ip | length > 0 else pihole_service_ip }}"
+
+- name: Already failed over?
+  ansible.builtin.stat:
+    path: "{{ pihole_state_dir }}/failover-active"
+  register: fo_flag
+
+- name: Refuse to fail over twice
+  ansible.builtin.fail:
+    msg: "Failover is already active (see {{ pihole_state_dir }}/failover-active). Run pihole-failback.yml first."
+  when: fo_flag.stat.exists
+
+- name: Packages for the checks
+  ansible.builtin.apt:
+    name: [dnsutils, iputils-arping]
+    state: present
+
+# Two DHCP servers on one LAN hand out conflicting leases, and two hosts with
+# the service address break DNS for everyone. So the primary must really be gone.
+- name: Is the primary still answering DNS?
+  ansible.builtin.command: dig +short +time=2 +tries=2 @{{ pihole_service_ip }} pi.hole
+  register: primary_dns
+  failed_when: false
+  changed_when: false
+  when: not fo_test | bool
+
+- name: Refuse while the primary is alive
+  ansible.builtin.fail:
+    msg: >-
+      {{ pihole_primary }} still answers DNS at {{ pihole_service_ip }}. Power it off or
+      unplug its network cable first. If it answers but is broken in some other way,
+      rerun with -e pihole_failover_force=true - after making sure it is not serving DHCP.
+  when: not fo_test | bool and primary_dns.stdout | length > 0 and not pihole_failover_force | bool
+
+# A standby that cannot answer DNS must not take the address: clients would
+# lose DNS outright instead of merely lacking a primary. FTL can be busy for a
+# minute or two after a restart or a blocklist reload.
+- name: This Pi-hole answers DNS locally before it takes over
+  ansible.builtin.command: dig +short +time=3 +tries=1 @127.0.0.1 pi.hole
+  register: fo_local
+  until: fo_local.rc == 0 and fo_local.stdout | length > 0
+  retries: 24
+  delay: 5
+  failed_when: false
+  changed_when: false
+
+- name: Refuse to take over with a Pi-hole that does not answer
+  ansible.builtin.assert:
+    that: fo_local.rc == 0 and fo_local.stdout | length > 0
+    fail_msg: "Pi-hole on {{ inventory_hostname }} does not answer DNS on 127.0.0.1 - not taking over {{ fo_ip }}."
+
+- name: Stop syncing from the primary (it is gone - or this is a rehearsal)
+  ansible.builtin.systemd_service:
+    name: pihole-sync.timer
+    state: stopped
+
+- name: NetworkManager connection on {{ pihole_interface }}
+  ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show {{ pihole_interface }}
+  register: nm_conn
+  changed_when: false
+
+# The standby keeps its own DHCP-assigned address and gains the service
+# address alongside it. NetworkManager must own it: on Raspberry Pi OS
+# bookworm it silently ignores runtime address changes on a DHCP connection
+# (`device reapply` / `device modify`), and an address added behind its back
+# with `ip addr add` is swept away on its next sync - roughly every other
+# time. Re-activating the connection with the address in its profile is the
+# one way that sticks, and it survives reboots. The interface bounces for a
+# moment; the standby's own address comes straight back from DHCP.
+- name: Add {{ fo_ip }} to the connection profile
+  ansible.builtin.command: >-
+    nmcli connection modify {{ nm_conn.stdout | quote }} +ipv4.addresses {{ fo_ip }}/{{ pihole_prefix }}
+  changed_when: true
+
+- name: Re-activate the connection (the SSH session may blip)
+  ansible.builtin.shell: sleep 1; nmcli connection up {{ nm_conn.stdout | quote }}
+  async: 60
+  poll: 0
+  changed_when: true
+
+- name: Reconnect
+  ansible.builtin.wait_for_connection:
+    delay: 3
+    timeout: 90
+
+- name: Both addresses are on the interface
+  ansible.builtin.shell: ip -4 -o addr show dev {{ pihole_interface }} | awk '{print $4}'
+  register: fo_addrs
+  until: (fo_ip ~ '/' ~ pihole_prefix) in fo_addrs.stdout_lines and fo_addrs.stdout_lines | length >= 2
+  retries: 15
+  delay: 2
+  changed_when: false
+
+- name: Announce the address so clients update their ARP caches now
+  ansible.builtin.command: arping -U -c 3 -I {{ pihole_interface }} {{ fo_ip }}
+  failed_when: false
+  changed_when: false
+
+- name: Mark failover active
+  ansible.builtin.copy:
+    dest: "{{ pihole_state_dir }}/failover-active"
+    content: "{{ ansible_date_time.iso8601 }} {{ 'rehearsal ' if fo_test | bool else '' }}{{ fo_ip }}\n"
+    mode: "0644"
+
+# FTL (dnsmasq) in "local-service" mode only answers on addresses it knew
+# when it started; a newly added one is picked up unreliably. Restart it so the
+# address is served deterministically - in a rehearsal too, so the rehearsal
+# exercises exactly what a real failover does.
+- name: Restart FTL so it serves {{ fo_ip }}
+  ansible.builtin.systemd_service:
+    name: pihole-FTL
+    state: restarted
+  when: fo_test | bool
+
+- name: Serve DHCP (real failover only)
+  when: not fo_test | bool
+  block:
+    # The standby copied the primary's reservations, including the one that
+    # gives the primary's own MAC {{ fo_ip }}. A replacement primary booting
+    # during the failover would be handed the address this host now holds.
+    # Set those aside; failback's resumed sync brings them back.
+    - name: Set aside reservations for {{ fo_ip }} (the replacement primary gets a pool address)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json, subprocess, tomllib
+        c = tomllib.load(open("/etc/pihole/pihole.toml", "rb"))
+        hosts = c["dhcp"]["hosts"]
+        keep = [h for h in hosts if h.split(",")[1:2] != ["{{ fo_ip }}"]]
+        print(f"set aside {len(hosts) - len(keep)} reservation(s) for {{ fo_ip }}")
+        if len(keep) != len(hosts):
+            subprocess.run(["pihole-FTL", "--config", "dhcp.hosts", json.dumps(keep)], check=True,
+                           stdout=subprocess.DEVNULL)
+        PY
+      args:
+        executable: /bin/bash
+      register: fo_resv
+      changed_when: "'set aside 0' not in fo_resv.stdout"
+
+    - name: Enable DHCP
+      ansible.builtin.command: pihole-FTL --config dhcp.active true
+      changed_when: true
+
+    - name: Restart FTL
+      ansible.builtin.systemd_service:
+        name: pihole-FTL
+        state: restarted
+
+- name: DNS answers on {{ fo_ip }}
+  ansible.builtin.command: dig +short +time=3 +tries=2 @{{ fo_ip }} pi.hole
+  register: fo_dns
+  until: fo_dns.rc == 0 and fo_dns.stdout | length > 0
+  retries: 24
+  delay: 5
+  failed_when: false
+  changed_when: false
+
+- name: DNS must answer on {{ fo_ip }}
+  ansible.builtin.assert:
+    that: fo_dns.rc == 0 and fo_dns.stdout | length > 0
+    fail_msg: "{{ fo_ip }} does not answer DNS: {{ fo_dns.stdout }}"
+
+- name: DHCP state
+  ansible.builtin.command: pihole-FTL --config dhcp.active
+  register: fo_dhcp
+  changed_when: false
+
+- name: DHCP is on only for a real failover
+  ansible.builtin.assert:
+    that: (fo_dhcp.stdout == 'true') == (not fo_test | bool)
+
+- name: Done
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} now answers DNS at {{ fo_ip }}{{ ' and serves DHCP' if not fo_test | bool else ' (rehearsal: DHCP stays off)' }}.
+      Sync from {{ pihole_primary }} is stopped. Undo with playbooks/pihole-failback.yml
+      {{- ' -e pihole_failover_test_ip=' ~ fo_ip if fo_test | bool else '' }}.

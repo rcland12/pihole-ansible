@@ -1,0 +1,12 @@
+---
+# Issue Pi-hole's web/API certificate from your mkcert CA. Pi-hole's config
+# (webserver.tls.cert) points at /etc/pihole/tls/pihole.pem, and that file is
+# not part of a Teleporter archive - without it FTL's web server (admin UI and
+# API) does not start at all, although DNS keeps working.
+pihole_tls_file: /etc/pihole/tls/pihole.pem
+# mkcert's CA directory (the CA's owner is pihole_user).
+pihole_user: "{{ ansible_user | default('pi') }}"
+pihole_tls_caroot: "/home/{{ pihole_user }}/.local/share/mkcert"
+pihole_tls_names: [pi.hole, localhost, 127.0.0.1]
+# Reissue even if the current certificate already covers every name.
+pihole_tls_renew: false

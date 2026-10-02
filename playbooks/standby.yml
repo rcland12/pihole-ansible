@@ -1,0 +1,10 @@
+---
+# Make the host(s) in group `pihole_standby` a synced, DHCP-less copy of the
+# primary (pihole_primary).
+#   ansible-playbook rcland12.pihole.standby -i inventory.yml
+- name: Pi-hole standby
+  hosts: "{{ pihole_standby_hosts | default('pihole_standby') }}"
+  become: true
+  roles:
+    - rcland12.pihole.host
+    - rcland12.pihole.replica

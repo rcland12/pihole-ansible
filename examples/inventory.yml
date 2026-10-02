@@ -1,0 +1,17 @@
+# Example inventory: one primary Pi-hole serving DNS + DHCP, one standby.
+# Copy to your own inventory and adjust addresses.
+all:
+  vars:
+    ansible_user: pi                 # login on both Pis (needs passwordless sudo)
+    pihole_primary: pihole1          # the inventory name of the primary
+    pihole_domain: home.arpa
+    pihole_lan_cidr: 192.168.0.0/16
+  children:
+    pihole_primary:
+      hosts:
+        pihole1:
+          ansible_host: 192.168.10.53  # the address every client uses for DNS
+    pihole_standby:
+      hosts:
+        pihole2:
+          ansible_host: 192.168.10.54

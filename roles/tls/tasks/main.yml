@@ -1,0 +1,56 @@
+---
+- name: mkcert
+  ansible.builtin.apt:
+    name: mkcert
+    state: present
+
+- name: The CA must be present
+  ansible.builtin.stat:
+    path: "{{ pihole_tls_caroot }}/rootCA-key.pem"
+  register: ca_key
+  failed_when: not ca_key.stat.exists
+
+- name: Does the current certificate cover every name?
+  ansible.builtin.shell: |
+    set -euo pipefail
+    # No certificate yet (fresh install) simply means "not covered".
+    have=$( (openssl x509 -in {{ pihole_tls_file | quote }} -noout -ext subjectAltName 2>/dev/null || true) \
+           | tail -n +2 | tr ',' '\n' | sed -E 's/^ *(DNS|IP Address)://' | sort -u)
+    for n in {{ pihole_tls_names | map('quote') | join(' ') }}; do grep -qx "$n" <<<"$have" || { echo "missing $n"; exit 0; }; done
+    echo covered
+  args:
+    executable: /bin/bash
+  register: tls_state
+  changed_when: false
+
+- name: Issue the certificate (key + cert in one PEM, as FTL expects)
+  when: tls_state.stdout != 'covered' or pihole_tls_renew | bool
+  ansible.builtin.shell: |
+    set -euo pipefail
+    d=$(mktemp -d)
+    CAROOT={{ pihole_tls_caroot | quote }} mkcert -cert-file "$d/cert.pem" -key-file "$d/key.pem" \
+      {{ pihole_tls_names | map('quote') | join(' ') }}
+    install -d -o pihole -g pihole -m 755 {{ pihole_tls_file | dirname | quote }}
+    cat "$d/key.pem" "$d/cert.pem" > "$d/pihole.pem"
+    install -o pihole -g pihole -m 600 "$d/pihole.pem" {{ pihole_tls_file | quote }}
+    rm -rf "$d"
+  args:
+    executable: /bin/bash
+  register: tls_issued
+  changed_when: true
+
+- name: Restart FTL to load it
+  when: tls_issued is changed
+  ansible.builtin.systemd_service:
+    name: pihole-FTL
+    state: restarted
+
+- name: Admin UI answers over HTTPS with a certificate the CA vouches for
+  ansible.builtin.command: >-
+    curl -sS -o /dev/null -w '%{http_code}' --cacert {{ pihole_tls_caroot }}/rootCA.pem
+    --resolve pi.hole:443:127.0.0.1 https://pi.hole/admin/
+  register: tls_http
+  until: tls_http.stdout in ['200', '302', '308']
+  retries: 15
+  delay: 2
+  changed_when: false

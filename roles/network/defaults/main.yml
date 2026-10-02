@@ -1,0 +1,7 @@
+---
+# Give a Pi-hole host a fixed address via NetworkManager (the default on
+# Raspberry Pi OS bookworm). All three are REQUIRED - no defaults.
+pihole_net_interface: eth0
+pihole_net_address: ""      # e.g. 192.168.10.53/24
+pihole_net_gateway: ""      # e.g. 192.168.10.1
+pihole_net_dns: 127.0.0.1

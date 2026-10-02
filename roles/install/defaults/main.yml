@@ -1,0 +1,14 @@
+---
+# Install Pi-hole v6 unattended and load a Teleporter archive into it.
+# Used by pihole_replica (standby, from the live primary) and pihole_restore
+# (rebuilding the primary, from backup). Generic: nothing here names a host.
+
+# Path ON THE TARGET to a Teleporter .zip (unfiltered; filtered below).
+pihole_teleporter: ""
+
+# Keep dhcp.active as it is in the archive (rebuilding the primary). Otherwise
+# DHCP is forced off. A host in the `test` group ALWAYS gets it off: a second
+# DHCP server on the LAN hands out conflicting leases.
+pihole_keep_dhcp: false
+
+pihole_installer_url: "https://raw.githubusercontent.com/pi-hole/pi-hole/master/automated%20install/basic-install.sh"

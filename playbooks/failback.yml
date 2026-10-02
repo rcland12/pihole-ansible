@@ -1,0 +1,11 @@
+---
+# Undo a failover: the standby releases the address and DHCP. THEN power the
+# primary back on - never before.
+#   ansible-playbook rcland12.pihole.failback -i inventory.yml [-e pihole_failover_test_ip=<address>]
+- name: Pi-hole failback to the primary
+  hosts: "{{ pihole_standby_hosts | default('pihole_standby') }}"
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: rcland12.pihole.failover
+        tasks_from: failback

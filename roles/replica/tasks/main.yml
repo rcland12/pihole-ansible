@@ -1,0 +1,126 @@
+---
+- name: pihole_primary must name the primary's inventory host
+  ansible.builtin.assert:
+    that: pihole_primary | length > 0 and pihole_primary in hostvars
+
+# --- SSH trust: standby -> primary, pinned from the primary's own host key ---
+
+- name: Standby's SSH key for {{ pihole_ssh_user }}
+  community.crypto.openssh_keypair:
+    path: "/home/{{ pihole_ssh_user }}/.ssh/id_ed25519"
+    type: ed25519
+    owner: "{{ pihole_ssh_user }}"
+    group: "{{ pihole_ssh_user }}"
+  register: standby_key
+
+- name: Authorize the standby's key on the primary
+  ansible.posix.authorized_key:
+    user: "{{ pihole_ssh_user }}"
+    key: "{{ standby_key.public_key }}"
+    comment: "{{ pihole_ssh_user }}@{{ inventory_hostname }} pihole-sync"
+  delegate_to: "{{ pihole_primary }}"
+  become: false
+
+- name: Read the primary's host key on the primary itself
+  ansible.builtin.slurp:
+    src: /etc/ssh/ssh_host_ed25519_key.pub
+  delegate_to: "{{ pihole_primary }}"
+  register: primary_hostkey
+
+- name: Pin the primary's host key on the standby
+  ansible.builtin.known_hosts:
+    path: "/home/{{ pihole_ssh_user }}/.ssh/known_hosts"
+    name: "{{ hostvars[pihole_primary].ansible_host }}"
+    key: "{{ hostvars[pihole_primary].ansible_host }} {{ (primary_hostkey.content | b64decode).split()[:2] | join(' ') }}"
+  become: false
+
+# --- Pi-hole itself, installed from the primary's live config, DHCP off ------
+
+- name: Pull a Teleporter archive from the primary
+  ansible.builtin.shell: |
+    set -euo pipefail
+    runuser -u {{ pihole_ssh_user }} -- ssh -n -4 -o BatchMode=yes -o LogLevel=ERROR \
+      {{ hostvars[pihole_primary].ansible_host }} \
+      'd=$(mktemp -d) && cd "$d" && sudo pihole-FTL --teleporter >/dev/null && sudo cat pi-hole_*_teleporter_*.zip; rc=$?; sudo rm -rf "$d"; exit $rc' \
+      > /var/tmp/pihole-primary.zip
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: Install / load Pi-hole (DHCP forced off)
+  ansible.builtin.include_role:
+    name: rcland12.pihole.install
+  vars:
+    pihole_teleporter: /var/tmp/pihole-primary.zip
+    pihole_keep_dhcp: false
+
+- name: Remove the pulled archive
+  ansible.builtin.file:
+    path: /var/tmp/pihole-primary.zip
+    state: absent
+
+- name: mkcert, so the standby can issue certs with the synced CA
+  ansible.builtin.apt:
+    name: mkcert
+    state: present
+
+# --- the sync job ---
+
+- name: State directory
+  ansible.builtin.file:
+    path: /var/lib/pihole-sync
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Sync script (the filter comes from pihole_install)
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "/usr/local/sbin/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - { src: pihole-sync.sh, dest: pihole-sync }
+
+- name: Sync settings
+  ansible.builtin.template:
+    src: pihole-sync.default.j2
+    dest: /etc/default/pihole-sync
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: systemd units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [pihole-sync.service, pihole-sync.timer]
+  notify: Reload systemd
+
+- name: Flush handlers so the units are known
+  ansible.builtin.meta: flush_handlers
+
+- name: First sync now (fails loudly if the primary is unreachable)
+  ansible.builtin.systemd_service:
+    name: pihole-sync.service
+    state: started
+
+# The first sync brought the CA over; now the standby can issue its own
+# web certificate. Named for both roles, so the UI keeps a valid certificate
+# after a failover moves the primary's address and name here.
+- name: Web certificate for the standby
+  ansible.builtin.include_role:
+    name: rcland12.pihole.tls
+  vars:
+    pihole_tls_names: "{{ pihole_standby_tls_names }}"
+
+- name: Enable the sync timer
+  ansible.builtin.systemd_service:
+    name: pihole-sync.timer
+    enabled: true
+    state: started

@@ -1,0 +1,152 @@
+---
+- name: A Teleporter archive must be given
+  ansible.builtin.assert:
+    that: pihole_teleporter | length > 0
+    fail_msg: "set pihole_teleporter to the path of a Teleporter .zip on the target"
+
+- name: Packages (dig for the checks below)
+  ansible.builtin.apt:
+    name: [curl, dnsutils, python3]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: python3 with tomllib (3.11+) for the filter
+  ansible.builtin.command: python3 -c "import tomllib"
+  changed_when: false
+
+- name: Teleporter filter
+  ansible.builtin.copy:
+    src: pihole-replica-filter.py
+    dest: /usr/local/sbin/pihole-replica-filter
+    mode: "0755"
+
+- name: Effective DHCP decision
+  ansible.builtin.set_fact:
+    pihole_dhcp_wanted: "{{ (pihole_keep_dhcp | bool) and inventory_hostname not in groups.get('test', []) }}"
+
+- name: Filter the archive (drops /etc/hosts and the query log; DHCP off unless kept)
+  ansible.builtin.command: >-
+    /usr/local/sbin/pihole-replica-filter {{ pihole_teleporter | quote }} /var/tmp/pihole-seed.zip
+    {{ '--keep-dhcp' if pihole_dhcp_wanted | bool else '' }}
+  changed_when: true
+
+- name: Is Pi-hole already installed?
+  ansible.builtin.stat:
+    path: /usr/local/bin/pihole
+  register: pihole_bin
+
+# The installer treats an existing pihole.toml as a repair and keeps it, so
+# seeding it first means the new install starts with this config - DHCP state
+# included - and never runs with defaults, not even for a moment.
+- name: Fresh install, seeded with the archive's pihole.toml
+  when: not pihole_bin.stat.exists
+  block:
+    - name: /etc/pihole
+      ansible.builtin.file:
+        path: /etc/pihole
+        state: directory
+        mode: "0755"
+
+    - name: Seed pihole.toml
+      ansible.builtin.shell: >-
+        python3 -c "import zipfile,sys; sys.stdout.buffer.write(zipfile.ZipFile('/var/tmp/pihole-seed.zip').read('etc/pihole/pihole.toml'))"
+        > /etc/pihole/pihole.toml
+      changed_when: true
+
+    - name: Download the Pi-hole installer
+      ansible.builtin.get_url:
+        url: "{{ pihole_installer_url }}"
+        dest: /root/pihole-basic-install.sh
+        mode: "0700"
+        force: true
+
+    - name: Install Pi-hole (unattended)
+      ansible.builtin.command: bash /root/pihole-basic-install.sh --unattended
+      register: pihole_installer
+      changed_when: true
+
+- name: Import the whole archive (gravity, lists, groups, dnsmasq.d, config)
+  ansible.builtin.command: pihole-FTL --teleporter /var/tmp/pihole-seed.zip
+  changed_when: true
+
+- name: DHCP must be off here (checked on the live config, before FTL restarts)
+  ansible.builtin.command: pihole-FTL --config dhcp.active false
+  when: not pihole_dhcp_wanted | bool
+  changed_when: false
+
+- name: Restart FTL with the imported config
+  ansible.builtin.systemd_service:
+    name: pihole-FTL
+    state: restarted
+    enabled: true
+
+# A Teleporter archive carries WHICH blocklists to use, not their contents
+# (millions of domains). Download them now, or the new Pi-hole blocks only
+# whatever the installer's default list held.
+- name: Download every configured blocklist (pihole -g)
+  ansible.builtin.command: pihole -g
+  register: gravity_run
+  changed_when: true
+
+# --- checks -------------------------------------------------------------------
+
+- name: Read back the running config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import json, tomllib
+    c = tomllib.load(open("/etc/pihole/pihole.toml", "rb"))
+    import subprocess
+    host = next((h for h in c["dns"]["hosts"] if len(h.split()) == 2), "")
+    q = lambda sql: subprocess.run(["pihole-FTL", "sqlite3", "/etc/pihole/gravity.db", sql],
+                                   capture_output=True, text=True).stdout.strip() or "0"
+    print(json.dumps({"dhcp_active": c["dhcp"]["active"], "reservations": len(c["dhcp"]["hosts"]),
+                      "local_dns": len(c["dns"]["hosts"]), "probe": host,
+                      "lists": int(q("select count(*) from adlist where enabled=1")),
+                      "lists_loaded": int(q("select count(distinct adlist_id) from gravity")),
+                      "blocked": int(q("select count(*) from gravity"))}))
+    PY
+  args:
+    executable: /bin/bash
+  register: pihole_state_raw
+  changed_when: false
+
+- name: Checks
+  vars:
+    st: "{{ pihole_state_raw.stdout | from_json }}"
+  block:
+    - name: DHCP state is what was intended
+      ansible.builtin.assert:
+        that: st.dhcp_active == (pihole_dhcp_wanted | bool)
+        fail_msg: "dhcp.active is {{ st.dhcp_active }}, wanted {{ pihole_dhcp_wanted }}"
+
+    - name: Reservations came across
+      ansible.builtin.assert:
+        that: st.reservations | int > 0
+
+    - name: A local DNS record resolves through this Pi-hole
+      ansible.builtin.command: dig +short +time=3 +tries=5 @127.0.0.1 {{ st.probe.split()[1] }}
+      register: dig_out
+      until: dig_out.stdout.strip() == st.probe.split()[0]
+      retries: 10
+      delay: 3
+      changed_when: false
+      when: st.probe | length > 0
+
+    - name: Every enabled blocklist was downloaded
+      ansible.builtin.assert:
+        that: st.lists_loaded | int == st.lists | int
+        fail_msg: "only {{ st.lists_loaded }} of {{ st.lists }} enabled blocklists have entries - see pihole -g output"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          Pi-hole up: {{ st.reservations }} DHCP reservations, {{ st.local_dns }} local DNS records,
+          {{ st.blocked }} blocked domains from {{ st.lists }} lists,
+          DHCP {{ 'ON' if st.dhcp_active else 'off' }}{{ (', ' ~ st.probe.split()[1] ~ ' -> ' ~ st.probe.split()[0]) if st.probe else '' }}
+
+- name: Remove the seed archive
+  ansible.builtin.file:
+    path: /var/tmp/pihole-seed.zip
+    state: absent

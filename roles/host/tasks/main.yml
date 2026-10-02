@@ -1,0 +1,65 @@
+---
+- name: unbound
+  when: pihole_unbound | bool
+  block:
+    - name: unbound package
+      ansible.builtin.apt:
+        name: unbound
+        state: present
+
+    - name: unbound config for Pi-hole (127.0.0.1#5335)
+      ansible.builtin.copy:
+        src: unbound-pi-hole.conf
+        dest: /etc/unbound/unbound.conf.d/pi-hole.conf
+        mode: "0644"
+      notify: Restart unbound
+
+    # Debian starts unbound the moment it is installed, with its default
+    # config: port 53, which Pi-hole already holds. It fails repeatedly and
+    # systemd gives up ("start request repeated too quickly"), so a plain
+    # restart later is refused too. Clear that, then start with our config.
+    - name: Clear any failed start from the default config
+      ansible.builtin.command: systemctl reset-failed unbound
+      failed_when: false
+      changed_when: false
+
+    - name: Apply config now
+      ansible.builtin.meta: flush_handlers
+
+    - name: unbound running
+      ansible.builtin.systemd_service:
+        name: unbound
+        state: started
+        enabled: true
+
+    - name: unbound resolves on 127.0.0.1#5335
+      ansible.builtin.command: dig +short +time=5 +tries=3 -p 5335 @127.0.0.1 example.com
+      register: unbound_check
+      until: unbound_check.rc == 0 and unbound_check.stdout | length > 0
+      retries: 10
+      delay: 3
+      changed_when: false
+
+- name: ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+# Rules first, enable last: SSH from the LAN is allowed before the default
+# deny takes effect, so this cannot lock the controller out.
+- name: ufw rules
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    from_ip: "{{ item.from | default('any') }}"
+    comment: "{{ item.comment | default(omit) }}"
+  loop: "{{ pihole_ufw_rules }}"
+  loop_control:
+    label: "{{ item.port }}/{{ item.proto }} from {{ item.from | default('any') }}"
+
+- name: ufw on, deny incoming by default
+  community.general.ufw:
+    state: enabled
+    policy: deny
+    direction: incoming

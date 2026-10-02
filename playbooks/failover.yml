@@ -1,0 +1,12 @@
+---
+# The primary is dead: the standby takes over its address, DNS and DHCP.
+#   ansible-playbook rcland12.pihole.failover -i inventory.yml
+#   ... -e pihole_failover_test_ip=<free address>     # rehearsal, DHCP stays off
+# Run it from the standby itself if the primary was also your controller.
+- name: Pi-hole failover to the standby
+  hosts: "{{ pihole_standby_hosts | default('pihole_standby') }}"
+  become: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: rcland12.pihole.failover
+        tasks_from: failover
