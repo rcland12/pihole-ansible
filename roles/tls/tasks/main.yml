@@ -74,24 +74,60 @@
     {% else %}
     cat "$d/key.pem" "$d/cert.pem" > "$d/pihole.pem"
     {% endif %}
+    # Keep the certificate that works, to put back if FTL rejects this one.
+    if [[ -s {{ pihole_tls_file | quote }} ]]; then cp -p {{ pihole_tls_file | quote }} {{ (pihole_tls_file ~ '.prev') | quote }}; fi
     install -o pihole -g pihole -m 600 "$d/pihole.pem" {{ pihole_tls_file | quote }}
   args:
     executable: /bin/bash
   register: tls_issued
   changed_when: true
 
-- name: Restart FTL to load it
-  when: tls_issued is changed
-  ansible.builtin.systemd_service:
-    name: pihole-FTL
-    state: restarted
+# FTL refuses to start its web server - admin UI and API - over a certificate
+# file it cannot parse (mbedTLS: e.g. a CA with a critical extension it does
+# not know), while DNS keeps working. So a failed check puts the previous
+# file back rather than leaving the UI down.
+- name: Load it and check the admin UI
+  block:
+    - name: Restart FTL to load it
+      when: tls_issued is changed
+      ansible.builtin.systemd_service:
+        name: pihole-FTL
+        state: restarted
 
-- name: Admin UI answers over HTTPS with a certificate the CA vouches for
-  ansible.builtin.command: >-
-    curl -sS -o /dev/null -w '%{http_code}' --cacert {{ tls_root }}
-    --resolve {{ pihole_tls_names[0] }}:443:127.0.0.1 https://{{ pihole_tls_names[0] }}/admin/
-  register: tls_http
-  until: tls_http.stdout in ['200', '302', '308']
-  retries: 15
-  delay: 2
-  changed_when: false
+    - name: Admin UI answers over HTTPS with a certificate the CA vouches for
+      ansible.builtin.command: >-
+        curl -sS -o /dev/null -w '%{http_code}' --cacert {{ tls_root }}
+        --resolve {{ pihole_tls_names[0] }}:443:127.0.0.1 https://{{ pihole_tls_names[0] }}/admin/
+      register: tls_http
+      until: tls_http.stdout in ['200', '302', '308']
+      retries: 15
+      delay: 2
+      changed_when: false
+  rescue:
+    - name: Was there a previous certificate?
+      ansible.builtin.stat:
+        path: "{{ pihole_tls_file }}.prev"
+      register: tls_prev
+
+    - name: Put the previous certificate back
+      ansible.builtin.copy:
+        src: "{{ pihole_tls_file }}.prev"
+        dest: "{{ pihole_tls_file }}"
+        remote_src: true
+        owner: pihole
+        group: pihole
+        mode: "0600"
+      when: tls_issued is changed and tls_prev.stat.exists
+
+    - name: Restart FTL with it
+      ansible.builtin.systemd_service:
+        name: pihole-FTL
+        state: restarted
+      when: tls_issued is changed and tls_prev.stat.exists
+
+    - name: Fail, saying why
+      ansible.builtin.fail:
+        msg: >-
+          The admin UI did not come up with the new certificate
+          {{ '(the previous one is back in place)' if (tls_issued is changed and tls_prev.stat.exists) else '' }}.
+          See /var/log/pihole/FTL.log for "Cannot parse certificate" and webserver.log.
