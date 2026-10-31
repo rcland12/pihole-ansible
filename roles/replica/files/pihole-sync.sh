@@ -10,7 +10,8 @@
 #   3. imports it and restarts FTL - only if the filtered config changed;
 #   4. copies the primary's dhcp.leases in place (no restart), so a failover
 #      starts from current leases rather than a day-old copy;
-#   5. copies the mkcert CA and issued certs, so the standby can issue certs.
+#   5. copies the extra paths in SYNC_PATHS (pihole_sync_paths) - e.g. a CA,
+#      so the standby can issue certificates after a failover.
 #
 # If the primary cannot be reached, nothing is imported: a dead primary must
 # never be synced over the standby that is about to replace it.
@@ -19,8 +20,9 @@
 # the flag file below stops the sync; failback removes it.
 
 set -euo pipefail
+SYNC_PATHS=()
 # shellcheck source=/dev/null
-source /etc/default/pihole-sync      # PRIMARY, SSH_USER
+source /etc/default/pihole-sync      # PRIMARY, SSH_USER, SYNC_PATHS
 
 STATE=/var/lib/pihole-sync
 FLAG="${STATE}/failover-active"
@@ -55,7 +57,12 @@ fi
 primary 'sudo cat /etc/pihole/dhcp.leases' > "${tmp}/dhcp.leases"
 install -m 644 -o pihole -g pihole "${tmp}/dhcp.leases" /etc/pihole/dhcp.leases
 
-primary 'tar -C "$HOME" -cf - .local/share/mkcert server-certs issue-cert.sh' \
-    | runuser -u "${SSH_USER}" -- tar -C "$(getent passwd "${SSH_USER}" | cut -d: -f6)" -xf -
+if (( ${#SYNC_PATHS[@]} )); then
+    # Into a scratch copy first: a truncated stream must not leave half a CA.
+    # A path the primary does not have (yet) is skipped, not an error.
+    primary "sudo tar -C / --ignore-failed-read -cf - $(printf '%q ' "${SYNC_PATHS[@]}") 2>/dev/null" > "${tmp}/paths.tar"
+    tar -tf "${tmp}/paths.tar" >/dev/null
+    tar -C / -xpf "${tmp}/paths.tar"
+fi
 
 date -Is > "${STATE}/last-success"

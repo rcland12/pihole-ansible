@@ -6,6 +6,13 @@ all:
     pihole_primary: pihole1          # the inventory name of the primary
     pihole_domain: home.arpa
     pihole_lan_cidr: 192.168.0.0/16
+    # The CA that signs the web certificates (the tls role, which replica
+    # runs too). Its files must be on the standby as well - list them here:
+    pihole_tls_ca_cert: /etc/my-ca/intermediate.crt
+    pihole_tls_ca_key: /etc/my-ca/intermediate.key
+    pihole_tls_ca_password_file: /etc/my-ca/password   # "" if the key is not encrypted
+    pihole_tls_ca_root: /etc/my-ca/root.crt
+    pihole_sync_paths: [/etc/my-ca]
   children:
     pihole_primary:
       hosts:

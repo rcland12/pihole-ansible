@@ -1,20 +1,35 @@
 ---
-- name: mkcert
-  ansible.builtin.apt:
-    name: mkcert
-    state: present
+- name: The CA must be given
+  ansible.builtin.assert:
+    that: pihole_tls_ca_cert | length > 0 and pihole_tls_ca_key | length > 0
+    fail_msg: "Set pihole_tls_ca_cert and pihole_tls_ca_key: the CA that signs Pi-hole's certificate."
 
 - name: The CA must be present
   ansible.builtin.stat:
-    path: "{{ pihole_tls_caroot }}/rootCA-key.pem"
-  register: ca_key
-  failed_when: not ca_key.stat.exists
+    path: "{{ item }}"
+  loop: "{{ [pihole_tls_ca_cert, pihole_tls_ca_key] + ([pihole_tls_ca_password_file] if pihole_tls_ca_password_file else []) }}"
+  register: tls_ca_files
+  failed_when: not tls_ca_files.stat.exists
 
-- name: Does the current certificate cover every name?
+- name: The root that checks it
+  ansible.builtin.set_fact:
+    tls_root: "{{ pihole_tls_ca_root if pihole_tls_ca_root else pihole_tls_ca_cert }}"
+
+# Reissue when the certificate is missing, lacks a name, expires within
+# pihole_tls_renew_days, or no longer chains to this CA (e.g. the CA changed).
+- name: Is the current certificate still good?
   ansible.builtin.shell: |
     set -euo pipefail
-    # No certificate yet (fresh install) simply means "not covered".
-    have=$( (openssl x509 -in {{ pihole_tls_file | quote }} -noout -ext subjectAltName 2>/dev/null || true) \
+    f={{ pihole_tls_file | quote }}
+    [[ -s "$f" ]] || { echo "missing"; exit 0; }
+    t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+    # pihole.pem is key + certificate + chain; the first certificate is ours.
+    awk '/BEGIN CERTIFICATE/{n++} n==1' "$f" > "$t/leaf.pem"
+    openssl verify -CAfile {{ tls_root | quote }} -untrusted {{ pihole_tls_ca_cert | quote }} "$t/leaf.pem" >/dev/null 2>&1 \
+      || { echo "not from this CA"; exit 0; }
+    openssl x509 -in "$t/leaf.pem" -noout -checkend $(( {{ pihole_tls_renew_days | int }} * 86400 )) >/dev/null \
+      || { echo "expires soon"; exit 0; }
+    have=$(openssl x509 -in "$t/leaf.pem" -noout -ext subjectAltName 2>/dev/null \
            | tail -n +2 | tr ',' '\n' | sed -E 's/^ *(DNS|IP Address)://' | sort -u)
     for n in {{ pihole_tls_names | map('quote') | join(' ') }}; do grep -qx "$n" <<<"$have" || { echo "missing $n"; exit 0; }; done
     echo covered
@@ -23,17 +38,43 @@
   register: tls_state
   changed_when: false
 
-- name: Issue the certificate (key + cert in one PEM, as FTL expects)
+- name: Why it is being reissued
+  ansible.builtin.debug:
+    msg: "Web certificate: {{ tls_state.stdout }}{{ ' (pihole_tls_renew)' if pihole_tls_renew | bool else '' }}"
+  when: tls_state.stdout != 'covered' or pihole_tls_renew | bool
+
+- name: Issue the certificate (key + cert + chain in one PEM, as FTL expects)
   when: tls_state.stdout != 'covered' or pihole_tls_renew | bool
   ansible.builtin.shell: |
     set -euo pipefail
-    d=$(mktemp -d)
-    CAROOT={{ pihole_tls_caroot | quote }} mkcert -cert-file "$d/cert.pem" -key-file "$d/key.pem" \
-      {{ pihole_tls_names | map('quote') | join(' ') }}
+    umask 077
+    d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
+    san=()
+    for n in {{ pihole_tls_names | map('quote') | join(' ') }}; do
+      if [[ $n =~ ^[0-9.]+$ ]]; then san+=("IP:$n"); else san+=("DNS:$n"); fi
+    done
+    cat > "$d/ext" <<EOF
+    basicConstraints = critical, CA:FALSE
+    keyUsage = critical, digitalSignature
+    extendedKeyUsage = serverAuth
+    subjectKeyIdentifier = hash
+    authorityKeyIdentifier = keyid
+    subjectAltName = $(IFS=,; echo "${san[*]}")
+    EOF
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout "$d/key.pem" -out "$d/req.csr" -subj "/CN={{ pihole_tls_names[0] }}" 2>/dev/null
+    openssl x509 -req -in "$d/req.csr" -sha256 -days {{ pihole_tls_days | int }} \
+      -CA {{ pihole_tls_ca_cert | quote }} -CAkey {{ pihole_tls_ca_key | quote }} \
+      {% if pihole_tls_ca_password_file %}-passin file:{{ pihole_tls_ca_password_file | quote }}{% endif %} \
+      -set_serial "0x$(openssl rand -hex 16)" -extfile "$d/ext" -out "$d/cert.pem" 2>/dev/null
+    openssl verify -CAfile {{ tls_root | quote }} -untrusted {{ pihole_tls_ca_cert | quote }} "$d/cert.pem" >/dev/null
     install -d -o pihole -g pihole -m 755 {{ pihole_tls_file | dirname | quote }}
+    {% if pihole_tls_ca_cert != tls_root %}
+    cat "$d/key.pem" "$d/cert.pem" {{ pihole_tls_ca_cert | quote }} > "$d/pihole.pem"
+    {% else %}
     cat "$d/key.pem" "$d/cert.pem" > "$d/pihole.pem"
+    {% endif %}
     install -o pihole -g pihole -m 600 "$d/pihole.pem" {{ pihole_tls_file | quote }}
-    rm -rf "$d"
   args:
     executable: /bin/bash
   register: tls_issued
@@ -47,8 +88,8 @@
 
 - name: Admin UI answers over HTTPS with a certificate the CA vouches for
   ansible.builtin.command: >-
-    curl -sS -o /dev/null -w '%{http_code}' --cacert {{ pihole_tls_caroot }}/rootCA.pem
-    --resolve pi.hole:443:127.0.0.1 https://pi.hole/admin/
+    curl -sS -o /dev/null -w '%{http_code}' --cacert {{ tls_root }}
+    --resolve {{ pihole_tls_names[0] }}:443:127.0.0.1 https://{{ pihole_tls_names[0] }}/admin/
   register: tls_http
   until: tls_http.stdout in ['200', '302', '308']
   retries: 15

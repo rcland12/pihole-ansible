@@ -15,7 +15,7 @@ export, your own backup) is up to you - see [Rebuilding a primary](#rebuilding-a
 ```
  clients ──DNS/DHCP──► primary (192.168.10.53)          standby (192.168.10.54)
                        Pi-hole, DHCP on      ──15 min──► Pi-hole, DHCP OFF
-                                             Teleporter  unbound, ufw, CA
+                                             Teleporter  unbound, ufw, extra paths
  primary dies:
  clients ──DNS/DHCP──► standby, now ALSO 192.168.10.53, DHCP on
 ```
@@ -24,8 +24,9 @@ export, your own backup) is up to you - see [Rebuilding a primary](#rebuilding-a
   the primary over SSH, filters it - DHCP forced **off**, proven to be the only
   change; the primary's `/etc/hosts` and query log dropped - and imports it
   only when the configuration changed, re-downloading the blocklists (an
-  archive lists blocklists, it does not contain them). Leases and the mkcert CA
-  are copied every run. If the primary is unreachable, nothing is imported.
+  archive lists blocklists, it does not contain them). Leases, and any extra
+  paths you list in `pihole_sync_paths` (your CA, say), are copied every run.
+  If the primary is unreachable, nothing is imported.
 - **Failover**: the standby adds the primary's address *alongside* its own
   (NetworkManager profile + live interface, gratuitous ARP), sets aside the
   reservation that gives the primary's MAC that address, and turns DHCP on.
@@ -43,10 +44,12 @@ export, your own backup) is up to you - see [Rebuilding a primary](#rebuilding-a
 - An SSH login with passwordless sudo on both Pis (`ansible_user`).
 - ansible-core 2.14+, and on the controller: `community.general`,
   `community.crypto`, `ansible.posix` (pulled in as dependencies).
-- Optional: a [mkcert](https://github.com/FiloSottile/mkcert) CA in the
-  primary's `~/.local/share/mkcert`, for the web certificate. Pi-hole's own
-  config points its web server at `/etc/pihole/tls/pihole.pem`; without that
-  file the admin UI and API do not start at all (DNS still does).
+- For the `tls` role: a CA certificate and its key on the host (an
+  intermediate is best; [step-ca](https://smallstep.com/docs/step-ca/) and
+  plain openssl CAs both work), given as `pihole_tls_ca_cert` /
+  `pihole_tls_ca_key`. Pi-hole's own config points its web server at
+  `/etc/pihole/tls/pihole.pem`; without that file the admin UI and API do not
+  start at all (DNS still does).
 
 ## Install
 
@@ -60,7 +63,7 @@ or in a `requirements.yml`:
 collections:
   - name: https://github.com/rcland12/pihole-ansible.git
     type: git
-    version: main
+    version: master
 ```
 
 ## Inventory
@@ -109,7 +112,7 @@ controller.
 |---|---|
 | `install` | installs Pi-hole v6 unattended from a Teleporter archive (`pihole_teleporter`): seeds `pihole.toml` first, so a new install never runs with defaults; imports the archive; downloads every blocklist; checks DHCP state, reservations, blocklists and that a local record resolves. DHCP off unless `pihole_keep_dhcp`; a host in group `test` always gets it off |
 | `host` | unbound on 127.0.0.1#5335 (point Pi-hole's first upstream at it) and ufw: DNS/DHCP from anywhere, SSH/HTTP/HTTPS/NTP from `pihole_lan_cidr`. Rules go in before the firewall is enabled |
-| `tls` | issues `/etc/pihole/tls/pihole.pem` from your mkcert CA for `pihole_tls_names`, and checks the admin UI answers with a certificate the CA vouches for |
+| `tls` | issues `/etc/pihole/tls/pihole.pem` (key, certificate and chain) from your CA for `pihole_tls_names`, reissuing when a name is missing, it expires within `pihole_tls_renew_days`, or it no longer chains to that CA; checks the admin UI answers with a certificate the CA vouches for |
 | `replica` | the standby: SSH trust to the primary (host key pinned from the primary itself), install from the primary's live config, the sync timer, a web certificate valid for both hosts' names |
 | `failover` | `tasks_from: failover` / `failback` |
 | `network` | a fixed address via NetworkManager, reconnecting on the new address |
@@ -121,7 +124,13 @@ controller.
 | `pihole_primary` | - (required) | inventory name of the primary |
 | `pihole_domain` | `home.arpa` | local domain of the hosts' names |
 | `pihole_lan_cidr` | `192.168.0.0/16` | where SSH, the admin UI and NTP are allowed from |
-| `pihole_user` / `pihole_ssh_user` | `ansible_user` | owns the mkcert CA; SSH login standby → primary |
+| `pihole_ssh_user` | `ansible_user` | SSH login standby → primary |
+| `pihole_sync_paths` | `[]` | extra absolute paths the standby copies from the primary every sync (read with sudo there); a missing one is skipped |
+| `pihole_tls_ca_cert`, `pihole_tls_ca_key` | - (required by `tls`) | the CA that signs the web certificate |
+| `pihole_tls_ca_password_file` | `""` | password file, if that key is encrypted |
+| `pihole_tls_ca_root` | `pihole_tls_ca_cert` | the root clients trust (when the CA is an intermediate) |
+| `pihole_tls_names`, `pihole_tls_days`, `pihole_tls_renew_days` | `[pi.hole]`, `365`, `30` | the web certificate |
+| `pihole_standby_tls_names` | see `roles/replica/defaults` | the standby's web certificate: its names and the primary's |
 | `pihole_sync_interval` | `15min` | standby sync period |
 | `pihole_service_ip` | the primary's `ansible_host` | the address taken over |
 | `pihole_failover_test_ip` | - | rehearsal address |

@@ -1,21 +1,24 @@
 ---
 # The standby pulls from this host. REQUIRED: an inventory hostname.
 pihole_primary: ""
-# Login on both Pis; owns the mkcert CA. Needs passwordless sudo on the primary.
+# Login on both Pis. Needs passwordless sudo on the primary.
 pihole_ssh_user: "{{ ansible_user | default('pi') }}"
 # Local domain for the hosts' DNS names.
 pihole_domain: home.arpa
 pihole_sync_interval: 15min
 
+# Extra paths copied from the primary on every sync (absolute; read with sudo
+# there, written as root here, owners kept by name). For example your CA's
+# files, so the standby can sign certificates after a failover. Empty: none.
+pihole_sync_paths: []
+
 # The standby's web certificate covers its own names AND the primary's, so
-# the admin UI stays valid after a failover.
+# the admin UI stays valid after a failover. It is signed by the CA given to
+# the tls role (pihole_tls_ca_*), which must be on the standby by then -
+# typically via pihole_sync_paths.
 pihole_standby_tls_names:
   - pi.hole
-  - localhost
-  - "{{ inventory_hostname }}"
   - "{{ inventory_hostname }}.{{ pihole_domain }}"
   - "{{ ansible_host }}"
-  - "{{ pihole_primary }}"
   - "{{ pihole_primary }}.{{ pihole_domain }}"
   - "{{ hostvars[pihole_primary].ansible_host }}"
-  - 127.0.0.1

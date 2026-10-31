@@ -1,3 +1,5 @@
 # {{ ansible_managed }}
 PRIMARY={{ hostvars[pihole_primary].ansible_host }}
 SSH_USER={{ pihole_ssh_user }}
+# Extra paths copied from the primary each run (pihole_sync_paths), relative to /.
+SYNC_PATHS=({% for p in pihole_sync_paths %}{{ (p | regex_replace('^/+', '')) | quote }} {% endfor %})

@@ -1,12 +1,24 @@
 ---
-# Issue Pi-hole's web/API certificate from your mkcert CA. Pi-hole's config
+# Issue Pi-hole's web/API certificate from your own CA. Pi-hole's config
 # (webserver.tls.cert) points at /etc/pihole/tls/pihole.pem, and that file is
 # not part of a Teleporter archive - without it FTL's web server (admin UI and
 # API) does not start at all, although DNS keeps working.
 pihole_tls_file: /etc/pihole/tls/pihole.pem
-# mkcert's CA directory (the CA's owner is pihole_user).
-pihole_user: "{{ ansible_user | default('pi') }}"
-pihole_tls_caroot: "/home/{{ pihole_user }}/.local/share/mkcert"
-pihole_tls_names: [pi.hole, localhost, 127.0.0.1]
-# Reissue even if the current certificate already covers every name.
+
+# The CA that signs it: a CA certificate and its private key, already on this
+# host (an intermediate is best; a root works too). REQUIRED.
+pihole_tls_ca_cert: ""
+pihole_tls_ca_key: ""
+# Password file for an encrypted CA key; empty if the key is not encrypted.
+pihole_tls_ca_password_file: ""
+# The root clients trust, to check the result; defaults to pihole_tls_ca_cert.
+pihole_tls_ca_root: ""
+
+# Names in the certificate (DNS names or IPv4 addresses). They must be names
+# your CA is allowed to sign, if it has name constraints.
+pihole_tls_names: [pi.hole]
+pihole_tls_days: 365
+# Reissue when fewer days than this remain.
+pihole_tls_renew_days: 30
+# Reissue even if the current certificate is fine.
 pihole_tls_renew: false

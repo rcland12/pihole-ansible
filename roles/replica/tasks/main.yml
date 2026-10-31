@@ -59,11 +59,6 @@
     path: /var/tmp/pihole-primary.zip
     state: absent
 
-- name: mkcert, so the standby can issue certs with the synced CA
-  ansible.builtin.apt:
-    name: mkcert
-    state: present
-
 # --- the sync job ---
 
 - name: State directory
@@ -110,8 +105,8 @@
     name: pihole-sync.service
     state: started
 
-# The first sync brought the CA over; now the standby can issue its own
-# web certificate. Named for both roles, so the UI keeps a valid certificate
+# The first sync brought the CA over (pihole_sync_paths); now the standby
+# can issue its own web certificate. Named for both roles, so the UI keeps a valid certificate
 # after a failover moves the primary's address and name here.
 - name: Web certificate for the standby
   ansible.builtin.include_role:
