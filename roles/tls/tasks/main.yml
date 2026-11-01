@@ -17,6 +17,8 @@
 
 # Reissue when the certificate is missing, lacks a name, expires within
 # pihole_tls_renew_days, or no longer chains to this CA (e.g. the CA changed).
+# -no-CApath -no-CAstore: -CAfile alone also trusts the system store, so a
+# certificate from an old CA still installed there would count as good.
 - name: Is the current certificate still good?
   ansible.builtin.shell: |
     set -euo pipefail
@@ -25,7 +27,7 @@
     t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
     # pihole.pem is key + certificate + chain; the first certificate is ours.
     awk '/BEGIN CERTIFICATE/{n++} n==1' "$f" > "$t/leaf.pem"
-    openssl verify -CAfile {{ tls_root | quote }} -untrusted {{ pihole_tls_ca_cert | quote }} "$t/leaf.pem" >/dev/null 2>&1 \
+    openssl verify -no-CApath -no-CAstore -CAfile {{ tls_root | quote }} -untrusted {{ pihole_tls_ca_cert | quote }} "$t/leaf.pem" >/dev/null 2>&1 \
       || { echo "not from this CA"; exit 0; }
     openssl x509 -in "$t/leaf.pem" -noout -checkend $(( {{ pihole_tls_renew_days | int }} * 86400 )) >/dev/null \
       || { echo "expires soon"; exit 0; }
@@ -67,7 +69,7 @@
       -CA {{ pihole_tls_ca_cert | quote }} -CAkey {{ pihole_tls_ca_key | quote }} \
       {% if pihole_tls_ca_password_file %}-passin file:{{ pihole_tls_ca_password_file | quote }}{% endif %} \
       -set_serial "0x$(openssl rand -hex 16)" -extfile "$d/ext" -out "$d/cert.pem" 2>/dev/null
-    openssl verify -CAfile {{ tls_root | quote }} -untrusted {{ pihole_tls_ca_cert | quote }} "$d/cert.pem" >/dev/null
+    openssl verify -no-CApath -no-CAstore -CAfile {{ tls_root | quote }} -untrusted {{ pihole_tls_ca_cert | quote }} "$d/cert.pem" >/dev/null
     install -d -o pihole -g pihole -m 755 {{ pihole_tls_file | dirname | quote }}
     {% if pihole_tls_ca_cert != tls_root %}
     cat "$d/key.pem" "$d/cert.pem" {{ pihole_tls_ca_cert | quote }} > "$d/pihole.pem"
@@ -94,10 +96,15 @@
         name: pihole-FTL
         state: restarted
 
+    # --capath on an empty directory: --cacert alone still trusts the system
+    # store too, so a certificate from an old CA still installed there would pass.
     - name: Admin UI answers over HTTPS with a certificate the CA vouches for
-      ansible.builtin.command: >-
-        curl -sS -o /dev/null -w '%{http_code}' --cacert {{ tls_root }}
+      ansible.builtin.shell: >-
+        e=$(mktemp -d); trap 'rmdir "$e"' EXIT;
+        curl -sS -o /dev/null -w '%{http_code}' --cacert {{ tls_root | quote }} --capath "$e"
         --resolve {{ pihole_tls_names[0] }}:443:127.0.0.1 https://{{ pihole_tls_names[0] }}/admin/
+      args:
+        executable: /bin/bash
       register: tls_http
       until: tls_http.stdout in ['200', '302', '308']
       retries: 15
