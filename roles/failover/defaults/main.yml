@@ -7,7 +7,12 @@
 # interface: no client, router or reservation has to change.
 
 pihole_primary: ""          # REQUIRED: the primary's inventory hostname
-pihole_service_ip: "{{ hostvars[pihole_primary].ansible_host }}"
+# The address clients use: the primary's LAN address (pihole_primary_address,
+# if set, else its ansible_host).
+pihole_service_ip: "{{ pihole_primary_address | default(hostvars[pihole_primary].ansible_host) }}"
+# Turn DHCP on in a real failover. false where the router does DHCP: the
+# standby then takes over only the address and DNS.
+pihole_failover_dhcp: true
 pihole_prefix: 24
 pihole_interface: eth0
 

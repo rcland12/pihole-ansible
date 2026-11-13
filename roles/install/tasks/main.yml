@@ -29,6 +29,7 @@
   ansible.builtin.command: >-
     /usr/local/sbin/pihole-replica-filter {{ pihole_teleporter | quote }} /var/tmp/pihole-seed.zip
     {{ '--keep-dhcp' if pihole_dhcp_wanted | bool else '' }}
+    {{ '' if pihole_require_reservations | bool else '--allow-no-reservations' }}
   changed_when: true
 
 - name: Is Pi-hole already installed?
@@ -124,6 +125,7 @@
     - name: Reservations came across
       ansible.builtin.assert:
         that: st.reservations | int > 0
+      when: pihole_require_reservations | bool
 
     - name: A local DNS record resolves through this Pi-hole
       ansible.builtin.command: dig +short +time=3 +tries=5 @127.0.0.1 {{ st.probe.split()[1] }}

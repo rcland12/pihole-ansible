@@ -118,10 +118,10 @@
   ansible.builtin.systemd_service:
     name: pihole-FTL
     state: restarted
-  when: fo_test | bool
+  when: fo_test | bool or not pihole_failover_dhcp | bool
 
-- name: Serve DHCP (real failover only)
-  when: not fo_test | bool
+- name: Serve DHCP (real failover only, unless pihole_failover_dhcp is false)
+  when: not fo_test | bool and pihole_failover_dhcp | bool
   block:
     # The standby copied the primary's reservations, including the one that
     # gives the primary's own MAC {{ fo_ip }}. A replacement primary booting
@@ -173,13 +173,13 @@
   register: fo_dhcp
   changed_when: false
 
-- name: DHCP is on only for a real failover
+- name: DHCP is on only for a real failover that serves it
   ansible.builtin.assert:
-    that: (fo_dhcp.stdout == 'true') == (not fo_test | bool)
+    that: (fo_dhcp.stdout == 'true') == (not fo_test | bool and pihole_failover_dhcp | bool)
 
 - name: Done
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }} now answers DNS at {{ fo_ip }}{{ ' and serves DHCP' if not fo_test | bool else ' (rehearsal: DHCP stays off)' }}.
+      {{ inventory_hostname }} now answers DNS at {{ fo_ip }}{{ ' (rehearsal: DHCP stays off)' if fo_test | bool else (' and serves DHCP' if pihole_failover_dhcp | bool else ' (DHCP stays with the router)') }}.
       Sync from {{ pihole_primary }} is stopped. Undo with playbooks/pihole-failback.yml
       {{- ' -e pihole_failover_test_ip=' ~ fo_ip if fo_test | bool else '' }}.

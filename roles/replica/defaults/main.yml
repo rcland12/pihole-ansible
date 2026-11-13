@@ -1,6 +1,10 @@
 ---
 # The standby pulls from this host. REQUIRED: an inventory hostname.
 pihole_primary: ""
+# The address the standby reaches the primary at, for the sync and its host
+# key pin. Defaults to the primary's ansible_host; set it when Ansible reaches
+# the primary some other way (a VPN address, say) than the standby does.
+pihole_primary_address: "{{ hostvars[pihole_primary].ansible_host }}"
 # Login on both Pis. Needs passwordless sudo on the primary.
 pihole_ssh_user: "{{ ansible_user | default('pi') }}"
 # Local domain for the hosts' DNS names.
@@ -21,4 +25,13 @@ pihole_standby_tls_names:
   - "{{ inventory_hostname }}.{{ pihole_domain }}"
   - "{{ ansible_host }}"
   - "{{ pihole_primary }}.{{ pihole_domain }}"
-  - "{{ hostvars[pihole_primary].ansible_host }}"
+  - "{{ pihole_primary_address }}"
+# Issue that certificate with the tls role. false: no CA here - leave the
+# certificate to Pi-hole, which makes its own self-signed one when
+# webserver.tls.cert does not exist.
+pihole_standby_tls: true
+
+# Refuse an archive with no DHCP reservations (a primary that serves DHCP and
+# has none looks wrong). false where the router does DHCP and the Pi-hole has
+# no reservations at all.
+pihole_require_reservations: true

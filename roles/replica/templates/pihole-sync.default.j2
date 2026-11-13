@@ -1,5 +1,7 @@
 # {{ ansible_managed }}
-PRIMARY={{ hostvars[pihole_primary].ansible_host }}
+PRIMARY={{ pihole_primary_address }}
 SSH_USER={{ pihole_ssh_user }}
+# 0: accept an archive with no DHCP reservations (pihole_require_reservations).
+REQUIRE_RESERVATIONS={{ 1 if pihole_require_reservations | bool else 0 }}
 # Extra paths copied from the primary each run (pihole_sync_paths), relative to /.
 SYNC_PATHS=({% for p in pihole_sync_paths %}{{ (p | regex_replace('^/+', '')) | quote }} {% endfor %})

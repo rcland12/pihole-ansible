@@ -3,6 +3,7 @@
 
     pihole-replica-filter IN.zip OUT.zip               # standby: DHCP forced off
     pihole-replica-filter IN.zip OUT.zip --keep-dhcp   # rebuilding the primary itself
+    ... --allow-no-reservations     # the router does DHCP; the Pi-hole has no reservations
 
 Prints a digest of the configuration it kept, so the caller can skip the
 import (and the FTL restart) when nothing changed.
@@ -46,7 +47,7 @@ def strip_volatile(d):
     return d
 
 
-def main(src: str, dst: str, keep_dhcp: bool = False) -> None:
+def main(src: str, dst: str, keep_dhcp: bool = False, allow_no_reservations: bool = False) -> None:
     digest = hashlib.sha256()
     with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
         names = zin.namelist()
@@ -62,7 +63,7 @@ def main(src: str, dst: str, keep_dhcp: bool = False) -> None:
                 a, b = tomllib.loads(original), tomllib.loads(replica)
                 if not keep_dhcp and (b["dhcp"]["active"] is not False or strip_volatile(a) != strip_volatile(b)):
                     sys.exit("refusing: disabling DHCP changed more than dhcp.active")
-                if len(b["dhcp"].get("hosts", [])) == 0:
+                if len(b["dhcp"].get("hosts", [])) == 0 and not allow_no_reservations:
                     sys.exit("refusing: archive has no DHCP reservations; primary looks wrong")
                 data = replica.encode()
                 # "# Last updated on ..." changes on every save; leave it out of the digest.
@@ -74,7 +75,9 @@ def main(src: str, dst: str, keep_dhcp: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--keep-dhcp"]
+    flags = {"--keep-dhcp", "--allow-no-reservations"}
+    args = [a for a in sys.argv[1:] if a not in flags]
     if len(args) != 2:
         sys.exit(__doc__)
-    main(args[0], args[1], keep_dhcp="--keep-dhcp" in sys.argv[1:])
+    main(args[0], args[1], keep_dhcp="--keep-dhcp" in sys.argv[1:],
+         allow_no_reservations="--allow-no-reservations" in sys.argv[1:])

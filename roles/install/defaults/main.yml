@@ -11,4 +11,8 @@ pihole_teleporter: ""
 # DHCP server on the LAN hands out conflicting leases.
 pihole_keep_dhcp: false
 
+# Refuse an archive with no DHCP reservations, and check they came across.
+# false where the router does DHCP and the Pi-hole has none.
+pihole_require_reservations: true
+
 pihole_installer_url: "https://raw.githubusercontent.com/pi-hole/pi-hole/master/automated%20install/basic-install.sh"

@@ -30,8 +30,8 @@
 - name: Pin the primary's host key on the standby
   ansible.builtin.known_hosts:
     path: "/home/{{ pihole_ssh_user }}/.ssh/known_hosts"
-    name: "{{ hostvars[pihole_primary].ansible_host }}"
-    key: "{{ hostvars[pihole_primary].ansible_host }} {{ (primary_hostkey.content | b64decode).split()[:2] | join(' ') }}"
+    name: "{{ pihole_primary_address }}"
+    key: "{{ pihole_primary_address }} {{ (primary_hostkey.content | b64decode).split()[:2] | join(' ') }}"
   become: false
 
 # --- Pi-hole itself, installed from the primary's live config, DHCP off ------
@@ -40,7 +40,7 @@
   ansible.builtin.shell: |
     set -euo pipefail
     runuser -u {{ pihole_ssh_user }} -- ssh -n -4 -o BatchMode=yes -o LogLevel=ERROR \
-      {{ hostvars[pihole_primary].ansible_host }} \
+      {{ pihole_primary_address }} \
       'd=$(mktemp -d) && cd "$d" && sudo pihole-FTL --teleporter >/dev/null && sudo cat pi-hole_*_teleporter_*.zip; rc=$?; sudo rm -rf "$d"; exit $rc' \
       > /var/tmp/pihole-primary.zip
   args:
@@ -53,6 +53,7 @@
   vars:
     pihole_teleporter: /var/tmp/pihole-primary.zip
     pihole_keep_dhcp: false
+    pihole_require_reservations: "{{ pihole_require_reservations }}"
 
 - name: Remove the pulled archive
   ansible.builtin.file:
@@ -113,6 +114,7 @@
     name: rcland12.pihole.tls
   vars:
     pihole_tls_names: "{{ pihole_standby_tls_names }}"
+  when: pihole_standby_tls | bool
 
 - name: Enable the sync timer
   ansible.builtin.systemd_service:

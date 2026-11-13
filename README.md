@@ -125,19 +125,41 @@ controller.
 | `pihole_domain` | `home.arpa` | local domain of the hosts' names |
 | `pihole_lan_cidr` | `192.168.0.0/16` | where SSH, the admin UI and NTP are allowed from |
 | `pihole_ssh_user` | `ansible_user` | SSH login standby → primary |
+| `pihole_primary_address` | the primary's `ansible_host` | where the standby reaches the primary (sync, host key pin) and, by default, the address a failover takes over. Set it when Ansible reaches the primary another way, e.g. over a VPN |
 | `pihole_sync_paths` | `[]` | extra absolute paths the standby copies from the primary every sync (read with sudo there); a missing one is skipped |
 | `pihole_tls_ca_cert`, `pihole_tls_ca_key` | - (required by `tls`) | the CA that signs the web certificate |
 | `pihole_tls_ca_password_file` | `""` | password file, if that key is encrypted |
 | `pihole_tls_ca_root` | `pihole_tls_ca_cert` | the root clients trust (when the CA is an intermediate) |
 | `pihole_tls_names`, `pihole_tls_days`, `pihole_tls_renew_days` | `[pi.hole]`, `365`, `30` | the web certificate |
 | `pihole_standby_tls_names` | see `roles/replica/defaults` | the standby's web certificate: its names and the primary's |
+| `pihole_standby_tls` | `true` | issue that certificate with `tls`. `false` with no CA: Pi-hole makes its own self-signed one |
+| `pihole_require_reservations` | `true` | refuse an archive with no DHCP reservations. `false` where the router does DHCP |
 | `pihole_sync_interval` | `15min` | standby sync period |
-| `pihole_service_ip` | the primary's `ansible_host` | the address taken over |
+| `pihole_service_ip` | `pihole_primary_address` | the address taken over |
+| `pihole_failover_dhcp` | `true` | turn DHCP on in a real failover. `false` where the router does DHCP |
 | `pihole_failover_test_ip` | - | rehearsal address |
 | `pihole_failover_force` | `false` | take over although the primary still answers |
 | `pihole_unbound` | `true` | install unbound |
 | `pihole_ufw_rules` | see `roles/host/defaults` | firewall rules |
 | `pihole_net_address`, `pihole_net_gateway` | - (required by `network`) | e.g. `192.168.10.53/24`, `192.168.10.1` |
+
+## When the router does DHCP
+
+The roles assume the primary serves DHCP, but they also work for a Pi-hole
+that only does DNS, with the router handing out addresses:
+
+```yaml
+pihole_require_reservations: false   # it has none
+pihole_failover_dhcp: false          # a failover takes the address, never DHCP
+pihole_standby_tls: false            # no CA: keep Pi-hole's own certificate
+```
+
+Leave out the `host` role there if the primary has no unbound or ufw.
+
+The simplest failover on such a network needs no playbook: have the router
+hand out **both** Pi-holes as DNS servers. Clients move to the second one by
+themselves when the first doesn't answer, and the sync keeps the two the
+same. `failover` remains for a router that takes only one DNS server.
 
 ## Rebuilding a primary
 

@@ -21,8 +21,11 @@
 
 set -euo pipefail
 SYNC_PATHS=()
+REQUIRE_RESERVATIONS=1
 # shellcheck source=/dev/null
-source /etc/default/pihole-sync      # PRIMARY, SSH_USER, SYNC_PATHS
+source /etc/default/pihole-sync      # PRIMARY, SSH_USER, SYNC_PATHS, REQUIRE_RESERVATIONS
+filter_opts=()
+[[ "${REQUIRE_RESERVATIONS}" == 0 ]] && filter_opts+=(--allow-no-reservations)
 
 STATE=/var/lib/pihole-sync
 FLAG="${STATE}/failover-active"
@@ -38,7 +41,7 @@ primary() {
 
 primary 'd=$(mktemp -d) && cd "$d" && sudo pihole-FTL --teleporter >/dev/null && sudo cat pi-hole_*_teleporter_*.zip; rc=$?; sudo rm -rf "$d"; exit $rc' \
     > "${tmp}/primary.zip"
-digest="$(/usr/local/sbin/pihole-replica-filter "${tmp}/primary.zip" "${tmp}/standby.zip")"
+digest="$(/usr/local/sbin/pihole-replica-filter "${tmp}/primary.zip" "${tmp}/standby.zip" "${filter_opts[@]}")"
 
 if [[ "${digest}" != "$(cat "${STATE}/last-digest" 2>/dev/null || true)" ]]; then
     pihole-FTL --teleporter "${tmp}/standby.zip"
